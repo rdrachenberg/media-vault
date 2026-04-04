@@ -12,11 +12,26 @@ const ScanLine = () => <div style={{ position: "absolute", inset: 0, background:
 
 const FilmGrain = () => <div style={{ position: "fixed", inset: 0, backgroundImage: `url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E")`, pointerEvents: "none", zIndex: 9999, opacity: 0.5 }} />;
 
+// ── Poster Image with retry ─────────────────────────────────────────────────
 function PosterImage({ url, title, size = "card" }) {
   const [failed, setFailed] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [retries, setRetries] = useState(0);
   const h = size === "detail" ? 280 : 180;
-  useEffect(() => { setFailed(false); setLoaded(false); }, [url]);
+
+  useEffect(() => { setFailed(false); setLoaded(false); setRetries(0); }, [url]);
+
+  const handleError = () => {
+    if (retries < 2) {
+      // Retry after a delay — mobile connections sometimes fail on first try
+      setTimeout(() => setRetries(r => r + 1), 1000 * (retries + 1));
+    } else {
+      setFailed(true);
+    }
+  };
+
+  // Build URL with cache-bust on retry
+  const imgSrc = url ? (retries > 0 ? `${url}?r=${retries}` : url) : null;
 
   return (
     <div style={{ height: h, overflow: "hidden", position: "relative", borderBottom: "1px solid rgba(245,197,24,0.1)", background: "#0a0a14" }}>
@@ -25,10 +40,17 @@ function PosterImage({ url, title, size = "card" }) {
           <ScanLine />{["🎬", "📼", "🎞️", "🎥", "🎭", "🍿"][Math.abs(title?.charCodeAt(0) || 0) % 6]}
         </div>
       )}
-      {url && !failed && (
+      {imgSrc && !failed && (
         <>
-          <img src={url} alt={title} onLoad={() => setLoaded(true)} onError={() => setFailed(true)}
-            style={{ width: "100%", height: "100%", objectFit: "cover", opacity: loaded ? 0.9 : 0, transition: "opacity 0.4s ease" }} />
+          <img
+            key={retries}
+            src={imgSrc}
+            alt={title}
+            crossOrigin="anonymous"
+            onLoad={() => setLoaded(true)}
+            onError={handleError}
+            style={{ width: "100%", height: "100%", objectFit: "cover", opacity: loaded ? 0.9 : 0, transition: "opacity 0.4s ease" }}
+          />
           {loaded && <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "40%", background: "linear-gradient(transparent, rgba(10,10,20,0.8))" }} />}
         </>
       )}
@@ -61,134 +83,152 @@ function AILoadingOverlay({ query }) {
   );
 }
 
-// ── Barcode Scanner ─────────────────────────────────────────────────────────
+// ── Barcode Scanner (html5-qrcode — works on iOS) ───────────────────────────
 function BarcodeScanner({ onDetected, onClose }) {
-  const videoRef = useRef(null);
-  const streamRef = useRef(null);
+  const scannerRef = useRef(null);
+  const containerRef = useRef(null);
   const [status, setStatus] = useState("Initializing camera...");
-  const [hasCamera, setHasCamera] = useState(true);
-  const [hasDetector, setHasDetector] = useState(true);
   const [code, setCode] = useState("");
-  const [scanCount, setScanCount] = useState(0);
   const [detected, setDetected] = useState(false);
+  const [scannerReady, setScannerReady] = useState(false);
 
-  // Start camera with optimal barcode-scanning constraints
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        // Request high-res with continuous autofocus for close-up barcode reading
-        const constraints = {
-          video: {
-            facingMode: { ideal: "environment" },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            focusMode: { ideal: "continuous" },
-            focusDistance: { ideal: 0 },   // closest focus possible
-          }
-        };
-        const s = await navigator.mediaDevices.getUserMedia(constraints);
-        if (cancelled) { s.getTracks().forEach(t => t.stop()); return; }
-        streamRef.current = s;
+    let mounted = true;
+    let html5Qrcode = null;
 
-        // Apply advanced constraints after stream is acquired (some devices need this)
-        const track = s.getVideoTracks()[0];
-        if (track) {
+    async function startScanner() {
+      try {
+        // Dynamic import — only load the library when scanner opens
+        const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import("html5-qrcode");
+
+        if (!mounted) return;
+
+        html5Qrcode = new Html5Qrcode("barcode-reader", {
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+          ],
+          verbose: false,
+        });
+
+        scannerRef.current = html5Qrcode;
+
+        await html5Qrcode.start(
+          { facingMode: "environment" },
+          {
+            fps: 15,
+            qrbox: (vw, vh) => ({
+              width: Math.min(vw * 0.8, 400),
+              height: Math.min(vh * 0.3, 150),
+            }),
+            aspectRatio: 1.333,
+            disableFlip: false,
+          },
+          (decodedText) => {
+            if (!mounted) return;
+            setDetected(true);
+            setStatus(`Detected: ${decodedText}`);
+            // Stop scanning and notify parent after brief feedback
+            html5Qrcode.stop().then(() => {
+              if (mounted) onDetected(decodedText);
+            }).catch(() => {
+              if (mounted) onDetected(decodedText);
+            });
+          },
+          () => { /* scan miss — normal, not an error */ }
+        );
+
+        if (mounted) {
+          setScannerReady(true);
+          setStatus("Hold phone 8–12 inches from barcode");
+
+          // Apply autofocus constraints to the camera track html5-qrcode created
           try {
-            const caps = track.getCapabilities?.() || {};
-            const advanced = {};
-            if (caps.focusMode?.includes("continuous")) advanced.focusMode = "continuous";
-            if (caps.torch) advanced.torch = false; // torch off by default, could add toggle
-            if (Object.keys(advanced).length > 0) {
-              await track.applyConstraints({ advanced: [advanced] });
+            const videoEl = document.querySelector("#barcode-reader video");
+            if (videoEl && videoEl.srcObject) {
+              const track = videoEl.srcObject.getVideoTracks()[0];
+              if (track) {
+                const caps = track.getCapabilities?.() || {};
+                const constraints = {};
+                if (caps.focusMode?.includes("continuous")) constraints.focusMode = "continuous";
+                if (caps.zoom) constraints.zoom = caps.zoom.min; // widest zoom = easier focus
+                if (Object.keys(constraints).length > 0) {
+                  await track.applyConstraints({ advanced: [constraints] });
+                }
+              }
             }
-          } catch { /* advanced constraints not supported, that's fine */ }
+          } catch { /* focus constraints not supported on this device */ }
         }
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = s;
-          await videoRef.current.play();
-          setStatus("Point camera at barcode...");
-        }
-      } catch {
-        if (!cancelled) { setHasCamera(false); setStatus("Camera unavailable — enter UPC manually"); }
+      } catch (err) {
+        console.error("Scanner init error:", err);
+        if (mounted) setStatus("Camera unavailable — enter UPC manually");
       }
-    })();
-    return () => { cancelled = true; if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); };
-  }, []);
-
-  // Barcode detection loop
-  useEffect(() => {
-    if (!("BarcodeDetector" in window)) {
-      setHasDetector(false);
-      setStatus("BarcodeDetector not supported — enter UPC manually");
-      return;
     }
-    if (!hasCamera) return;
 
-    let active = true;
-    const detector = new BarcodeDetector({ formats: ["ean_13", "upc_a", "ean_8", "upc_e", "code_128", "code_39"] });
-    let frameCount = 0;
+    startScanner();
 
-    const interval = setInterval(async () => {
-      if (!active || !videoRef.current || videoRef.current.readyState !== 4) return;
-      frameCount++;
-      setScanCount(frameCount);
-      try {
-        const barcodes = await detector.detect(videoRef.current);
-        if (barcodes.length > 0) {
-          active = false;
-          clearInterval(interval);
-          setDetected(true);
-          setStatus(`Detected: ${barcodes[0].rawValue}`);
-          // Brief flash feedback before closing
-          setTimeout(() => {
-            if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
-            onDetected(barcodes[0].rawValue);
-          }, 400);
-        }
-      } catch { }
-    }, 150); // Scan faster: every 150ms instead of 300ms
+    return () => {
+      mounted = false;
+      if (scannerRef.current) {
+        scannerRef.current.stop().catch(() => {});
+        scannerRef.current.clear().catch(() => {});
+      }
+    };
+  }, [onDetected]);
 
-    return () => { active = false; clearInterval(interval); };
-  }, [hasCamera, onDetected]);
+  const cleanup = () => {
+    if (scannerRef.current) {
+      scannerRef.current.stop().catch(() => {});
+      scannerRef.current.clear().catch(() => {});
+    }
+  };
 
-  const cleanup = () => { if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); };
-  const submit = () => { const c = code.trim(); if (c.length >= 8) { cleanup(); onDetected(c); } };
+  const submit = () => {
+    const c = code.trim();
+    if (c.length >= 8) { cleanup(); onDetected(c); }
+  };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-      <button onClick={() => { cleanup(); onClose(); }} style={{ position: "absolute", top: 20, right: 20, background: "none", border: "1px solid #ff4444", color: "#ff4444", padding: "8px 16px", cursor: "pointer", fontSize: 14, fontFamily: "inherit", letterSpacing: 2 }}>✕ Close</button>
-      {hasCamera && (
-        <div style={{ position: "relative", width: "90%", maxWidth: 500, aspectRatio: "4/3", borderRadius: 4, overflow: "hidden", border: `2px solid ${detected ? "#10b981" : "#f5c518"}`, transition: "border-color 0.3s" }}>
-          <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted autoPlay />
-          {!detected && (
-            <div style={{ position: "absolute", inset: "15% 10%", border: "2px solid rgba(245,197,24,0.6)", borderRadius: 8, boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)" }}>
-              <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: "#f5c518", animation: "scanPulse 1.5s ease-in-out infinite" }} />
-              {/* Corner markers for alignment */}
-              {[[0,0],[1,0],[0,1],[1,1]].map(([x,y],i) => (
-                <div key={i} style={{ position: "absolute", [y?"bottom":"top"]: -1, [x?"right":"left"]: -1, width: 20, height: 20, borderColor: "#f5c518", borderStyle: "solid", borderWidth: 0, [y?"borderBottom":"borderTop"]: "3px solid #f5c518", [x?"borderRight":"borderLeft"]: "3px solid #f5c518", [y&&!x?"borderBottomLeftRadius":x&&!y?"borderTopRightRadius":x&&y?"borderBottomRightRadius":"borderTopLeftRadius"]: 6 }} />
-              ))}
-            </div>
-          )}
-          {detected && (
-            <div style={{ position: "absolute", inset: 0, background: "rgba(16,185,129,0.2)", display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeSlideIn 0.3s ease" }}>
-              <div style={{ background: "#10b981", color: "#fff", padding: "12px 24px", borderRadius: 8, fontSize: 16, fontWeight: 700, letterSpacing: 1 }}>✓ SCANNED</div>
-            </div>
-          )}
-        </div>
-      )}
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Space Mono', monospace" }}>
+      <button onClick={() => { cleanup(); onClose(); }} style={{ position: "absolute", top: 20, right: 20, background: "none", border: "1px solid #ff4444", color: "#ff4444", padding: "8px 16px", cursor: "pointer", fontSize: 14, fontFamily: "inherit", letterSpacing: 2, zIndex: 10 }}>✕ Close</button>
+
+      {/* Scanner container — html5-qrcode injects its video element here */}
+      <div style={{ width: "90%", maxWidth: 500, borderRadius: 8, overflow: "hidden", border: `2px solid ${detected ? "#10b981" : "#f5c518"}`, transition: "border-color 0.3s", position: "relative" }}>
+        <div id="barcode-reader" ref={containerRef} style={{ width: "100%" }} />
+        {detected && (
+          <div style={{ position: "absolute", inset: 0, background: "rgba(16,185,129,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5, animation: "fadeSlideIn 0.3s ease" }}>
+            <div style={{ background: "#10b981", color: "#fff", padding: "12px 24px", borderRadius: 8, fontSize: 16, fontWeight: 700, letterSpacing: 1 }}>✓ SCANNED</div>
+          </div>
+        )}
+      </div>
+
       <p style={{ color: detected ? "#10b981" : "#f5c518", marginTop: 20, fontSize: 14, letterSpacing: 1, transition: "color 0.3s" }}>{status}</p>
-      {!detected && hasCamera && hasDetector && (
-        <p style={{ color: "#333", fontSize: 10, marginTop: 4, letterSpacing: 1 }}>
-          Scanning... ({scanCount} frames checked)
+      {!detected && scannerReady && (
+        <p style={{ color: "#555", fontSize: 10, marginTop: 6, letterSpacing: 0.5, textAlign: "center", maxWidth: 300 }}>
+          Tap the camera view to focus · Hold steady at arm's length
         </p>
       )}
+
+      {/* Manual entry fallback */}
       <div style={{ marginTop: 24, display: "flex", gap: 8 }}>
         <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} onKeyDown={e => e.key === "Enter" && submit()} placeholder="Enter UPC manually"
           style={{ background: "rgba(255,255,255,0.05)", border: "1px solid #444", color: "#f5c518", padding: "10px 16px", fontSize: 16, width: 220, fontFamily: "inherit", borderRadius: 4, outline: "none" }} />
         <button onClick={submit} style={{ background: "#f5c518", color: "#0a0a0a", border: "none", padding: "10px 20px", fontSize: 14, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1, borderRadius: 4 }}>LOOKUP</button>
       </div>
+
+      {/* Override html5-qrcode default styling */}
+      <style>{`
+        #barcode-reader { background: #0a0a14 !important; }
+        #barcode-reader video { border-radius: 4px; }
+        #barcode-reader img[alt="Info icon"] { display: none !important; }
+        #barcode-reader__scan_region { background: transparent !important; }
+        #barcode-reader__dashboard { display: none !important; }
+        #barcode-reader__header_message { color: #888 !important; font-size: 11px !important; font-family: 'Space Mono', monospace !important; }
+      `}</style>
     </div>
   );
 }
@@ -314,7 +354,6 @@ function AddModal({ onAdd, onClose }) {
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 900, background: "rgba(0,0,0,0.85)", backdropFilter: "blur(12px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div onClick={e => e.stopPropagation()} style={{ background: "linear-gradient(160deg,#1a1a2e,#0f0f23)", border: "1px solid rgba(245,197,24,0.25)", borderRadius: 10, maxWidth: 520, width: "100%", animation: "modalIn 0.3s ease", maxHeight: "90vh", overflowY: "auto" }}>
-        {/* Header + mode toggle */}
         <div style={{ padding: "24px 28px 16px", borderBottom: "1px solid rgba(245,197,24,0.1)" }}>
           <h2 style={{ color: "#f5c518", fontFamily: "'Anybody',sans-serif", margin: "0 0 12px", fontSize: 20 }}>Add Movie</h2>
           <div style={{ display: "flex", gap: 4, background: "rgba(0,0,0,0.3)", borderRadius: 4, padding: 3 }}>
@@ -324,9 +363,7 @@ function AddModal({ onAdd, onClose }) {
             ))}
           </div>
         </div>
-
         <div style={{ padding: "20px 28px" }}>
-          {/* Search bar */}
           <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
             <input type="text" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && !loading && doSearch()}
               placeholder={mode === "tmdb" ? "Search by title..." : "Describe the movie..."} style={{ ...fs, flex: 1, fontSize: 14, padding: "10px 14px" }} autoFocus />
@@ -335,12 +372,10 @@ function AddModal({ onAdd, onClose }) {
               {loading ? "..." : "SEARCH"}
             </button>
           </div>
-
           {loading && mode === "ai" && <AILoadingOverlay query={query} />}
           {loading && mode === "tmdb" && <div style={{ textAlign: "center", padding: 30 }}><div style={{ width: 28, height: 28, margin: "0 auto", border: "2px solid rgba(245,197,24,0.2)", borderTop: "2px solid #f5c518", borderRadius: "50%", animation: "aiSpin 1s linear infinite" }} /><p style={{ color: "#666", fontSize: 11, marginTop: 12 }}>Searching TMDB...</p></div>}
           {error && <div style={{ background: "rgba(255,68,68,0.08)", border: "1px solid rgba(255,68,68,0.2)", borderRadius: 6, padding: "14px 16px", marginBottom: 16 }}><p style={{ color: "#ff6b6b", fontSize: 12, margin: 0 }}>{error}</p></div>}
 
-          {/* TMDB poster grid */}
           {results.length > 0 && !selected && !loading && (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(100px,1fr))", gap: 10, marginBottom: 16 }}>
               {results.map(r => (
@@ -358,7 +393,6 @@ function AddModal({ onAdd, onClose }) {
             </div>
           )}
 
-          {/* Selected movie preview */}
           {selected && !loading && (
             <div style={{ background: "rgba(245,197,24,0.04)", border: "1px solid rgba(245,197,24,0.15)", borderRadius: 8, overflow: "hidden", marginBottom: 16 }}>
               <div style={{ display: "flex" }}>
@@ -418,49 +452,57 @@ export default function MediaVault() {
 
   const showToast = useCallback((msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); }, []);
 
-  // Auto-fetch poster URLs for seed items on mount
+  // Auto-fetch poster URLs for seed items on mount — sequential for reliability
   useEffect(() => {
     let cancelled = false;
     async function enrichPosters() {
-      // Deduplicate by tmdb_id so we don't fetch the same movie twice
-      const needPosters = [];
       const seenIds = new Set();
+      const toFetch = [];
       for (const item of STAR_WARS_SEED) {
         if (!item.poster_url && item.tmdb_id && !seenIds.has(item.tmdb_id)) {
           seenIds.add(item.tmdb_id);
-          needPosters.push(item);
+          toFetch.push(item);
         }
       }
-      if (needPosters.length === 0) return;
+      if (toFetch.length === 0) return;
       setEnriching(true);
-      const posterMap = {}; // tmdb_id -> poster_url
-      // Fetch in parallel batches of 4 to be polite to the API
-      for (let i = 0; i < needPosters.length; i += 4) {
-        const batch = needPosters.slice(i, i + 4);
-        const results = await Promise.allSettled(
-          batch.map(item =>
-            getMovieDetails(item.tmdb_id).then(d => ({ tmdb_id: item.tmdb_id, poster_url: d.poster_url }))
-          )
-        );
-        for (const r of results) {
-          if (r.status === "fulfilled" && r.value.poster_url) {
-            posterMap[r.value.tmdb_id] = r.value.poster_url;
+      const posterMap = {};
+
+      // Fetch one at a time — more reliable on mobile connections
+      for (const item of toFetch) {
+        if (cancelled) break;
+        try {
+          const detail = await getMovieDetails(item.tmdb_id);
+          if (detail?.poster_url) {
+            posterMap[item.tmdb_id] = detail.poster_url;
+            // Update library incrementally so posters appear as they load
+            if (!cancelled) {
+              setLibrary(prev => prev.map(m =>
+                !m.poster_url && m.tmdb_id === item.tmdb_id ? { ...m, poster_url: detail.poster_url } : m
+              ));
+            }
           }
+        } catch (err) {
+          console.warn(`Failed to fetch poster for ${item.title}:`, err);
+          // Retry once after a short delay
+          try {
+            await new Promise(r => setTimeout(r, 1000));
+            const detail = await getMovieDetails(item.tmdb_id);
+            if (detail?.poster_url && !cancelled) {
+              posterMap[item.tmdb_id] = detail.poster_url;
+              setLibrary(prev => prev.map(m =>
+                !m.poster_url && m.tmdb_id === item.tmdb_id ? { ...m, poster_url: detail.poster_url } : m
+              ));
+            }
+          } catch { /* give up on this one */ }
         }
       }
-      if (cancelled) return;
-      // Update library with fetched poster URLs
-      setLibrary(prev => prev.map(item => {
-        if (!item.poster_url && item.tmdb_id && posterMap[item.tmdb_id]) {
-          return { ...item, poster_url: posterMap[item.tmdb_id] };
-        }
-        return item;
-      }));
-      setEnriching(false);
+      if (!cancelled) setEnriching(false);
     }
     enrichPosters();
     return () => { cancelled = true; };
   }, []);
+
   const collections = ["All", ...new Set(library.map(m => m.collection))];
 
   const filtered = library.filter(m => {
