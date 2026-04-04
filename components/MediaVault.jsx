@@ -67,36 +67,89 @@ function BarcodeScanner({ onDetected, onClose }) {
   const streamRef = useRef(null);
   const [status, setStatus] = useState("Initializing camera...");
   const [hasCamera, setHasCamera] = useState(true);
+  const [hasDetector, setHasDetector] = useState(true);
   const [code, setCode] = useState("");
+  const [scanCount, setScanCount] = useState(0);
+  const [detected, setDetected] = useState(false);
 
+  // Start camera with optimal barcode-scanning constraints
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } } });
+        // Request high-res with continuous autofocus for close-up barcode reading
+        const constraints = {
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+            focusMode: { ideal: "continuous" },
+            focusDistance: { ideal: 0 },   // closest focus possible
+          }
+        };
+        const s = await navigator.mediaDevices.getUserMedia(constraints);
         if (cancelled) { s.getTracks().forEach(t => t.stop()); return; }
         streamRef.current = s;
-        if (videoRef.current) { videoRef.current.srcObject = s; await videoRef.current.play(); setStatus("Point camera at barcode..."); }
-      } catch { if (!cancelled) { setHasCamera(false); setStatus("Camera unavailable — enter UPC manually"); } }
+
+        // Apply advanced constraints after stream is acquired (some devices need this)
+        const track = s.getVideoTracks()[0];
+        if (track) {
+          try {
+            const caps = track.getCapabilities?.() || {};
+            const advanced = {};
+            if (caps.focusMode?.includes("continuous")) advanced.focusMode = "continuous";
+            if (caps.torch) advanced.torch = false; // torch off by default, could add toggle
+            if (Object.keys(advanced).length > 0) {
+              await track.applyConstraints({ advanced: [advanced] });
+            }
+          } catch { /* advanced constraints not supported, that's fine */ }
+        }
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = s;
+          await videoRef.current.play();
+          setStatus("Point camera at barcode...");
+        }
+      } catch {
+        if (!cancelled) { setHasCamera(false); setStatus("Camera unavailable — enter UPC manually"); }
+      }
     })();
     return () => { cancelled = true; if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop()); };
   }, []);
 
+  // Barcode detection loop
   useEffect(() => {
-    if (!("BarcodeDetector" in window) || !hasCamera) return;
+    if (!("BarcodeDetector" in window)) {
+      setHasDetector(false);
+      setStatus("BarcodeDetector not supported — enter UPC manually");
+      return;
+    }
+    if (!hasCamera) return;
+
     let active = true;
-    const detector = new BarcodeDetector({ formats: ["ean_13", "upc_a", "ean_8", "upc_e"] });
+    const detector = new BarcodeDetector({ formats: ["ean_13", "upc_a", "ean_8", "upc_e", "code_128", "code_39"] });
+    let frameCount = 0;
+
     const interval = setInterval(async () => {
       if (!active || !videoRef.current || videoRef.current.readyState !== 4) return;
+      frameCount++;
+      setScanCount(frameCount);
       try {
         const barcodes = await detector.detect(videoRef.current);
         if (barcodes.length > 0) {
-          if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+          active = false;
           clearInterval(interval);
-          onDetected(barcodes[0].rawValue);
+          setDetected(true);
+          setStatus(`Detected: ${barcodes[0].rawValue}`);
+          // Brief flash feedback before closing
+          setTimeout(() => {
+            if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop());
+            onDetected(barcodes[0].rawValue);
+          }, 400);
         }
       } catch { }
-    }, 300);
+    }, 150); // Scan faster: every 150ms instead of 300ms
+
     return () => { active = false; clearInterval(interval); };
   }, [hasCamera, onDetected]);
 
@@ -107,14 +160,30 @@ function BarcodeScanner({ onDetected, onClose }) {
     <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
       <button onClick={() => { cleanup(); onClose(); }} style={{ position: "absolute", top: 20, right: 20, background: "none", border: "1px solid #ff4444", color: "#ff4444", padding: "8px 16px", cursor: "pointer", fontSize: 14, fontFamily: "inherit", letterSpacing: 2 }}>✕ Close</button>
       {hasCamera && (
-        <div style={{ position: "relative", width: "90%", maxWidth: 500, aspectRatio: "4/3", borderRadius: 4, overflow: "hidden", border: "2px solid #f5c518" }}>
-          <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted />
-          <div style={{ position: "absolute", inset: "20%", border: "2px solid #f5c518", borderRadius: 8, boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)" }}>
-            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: "#f5c518", animation: "scanPulse 2s ease-in-out infinite" }} />
-          </div>
+        <div style={{ position: "relative", width: "90%", maxWidth: 500, aspectRatio: "4/3", borderRadius: 4, overflow: "hidden", border: `2px solid ${detected ? "#10b981" : "#f5c518"}`, transition: "border-color 0.3s" }}>
+          <video ref={videoRef} style={{ width: "100%", height: "100%", objectFit: "cover" }} playsInline muted autoPlay />
+          {!detected && (
+            <div style={{ position: "absolute", inset: "15% 10%", border: "2px solid rgba(245,197,24,0.6)", borderRadius: 8, boxShadow: "0 0 0 9999px rgba(0,0,0,0.5)" }}>
+              <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: "#f5c518", animation: "scanPulse 1.5s ease-in-out infinite" }} />
+              {/* Corner markers for alignment */}
+              {[[0,0],[1,0],[0,1],[1,1]].map(([x,y],i) => (
+                <div key={i} style={{ position: "absolute", [y?"bottom":"top"]: -1, [x?"right":"left"]: -1, width: 20, height: 20, borderColor: "#f5c518", borderStyle: "solid", borderWidth: 0, [y?"borderBottom":"borderTop"]: "3px solid #f5c518", [x?"borderRight":"borderLeft"]: "3px solid #f5c518", [y&&!x?"borderBottomLeftRadius":x&&!y?"borderTopRightRadius":x&&y?"borderBottomRightRadius":"borderTopLeftRadius"]: 6 }} />
+              ))}
+            </div>
+          )}
+          {detected && (
+            <div style={{ position: "absolute", inset: 0, background: "rgba(16,185,129,0.2)", display: "flex", alignItems: "center", justifyContent: "center", animation: "fadeSlideIn 0.3s ease" }}>
+              <div style={{ background: "#10b981", color: "#fff", padding: "12px 24px", borderRadius: 8, fontSize: 16, fontWeight: 700, letterSpacing: 1 }}>✓ SCANNED</div>
+            </div>
+          )}
         </div>
       )}
-      <p style={{ color: "#f5c518", marginTop: 20, fontSize: 14, letterSpacing: 1 }}>{status}</p>
+      <p style={{ color: detected ? "#10b981" : "#f5c518", marginTop: 20, fontSize: 14, letterSpacing: 1, transition: "color 0.3s" }}>{status}</p>
+      {!detected && hasCamera && hasDetector && (
+        <p style={{ color: "#333", fontSize: 10, marginTop: 4, letterSpacing: 1 }}>
+          Scanning... ({scanCount} frames checked)
+        </p>
+      )}
       <div style={{ marginTop: 24, display: "flex", gap: 8 }}>
         <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} onKeyDown={e => e.key === "Enter" && submit()} placeholder="Enter UPC manually"
           style={{ background: "rgba(255,255,255,0.05)", border: "1px solid #444", color: "#f5c518", padding: "10px 16px", fontSize: 16, width: 220, fontFamily: "inherit", borderRadius: 4, outline: "none" }} />
