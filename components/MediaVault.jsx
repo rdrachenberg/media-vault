@@ -425,8 +425,37 @@ function AddModal({ onAdd, onClose, initialUpc }) {
       } else {
         abortRef.current = new AbortController();
         const r = await aiLookup(q, abortRef.current.signal);
-        if (r.found === false) setError(r.suggestion || "Not found.");
-        else setSelected(r);
+        if (r.found === false) { setError(r.suggestion || "Not found."); }
+        else {
+          // AI found the movie — now enrich with TMDB poster
+          let enriched = { ...r };
+          if (r.title) {
+            try {
+              // Search TMDB by the title AI returned
+              const tmdbResults = await searchMovies(r.title);
+              if (tmdbResults.length > 0) {
+                // Find best match by year if available
+                const yearMatch = r.year ? tmdbResults.find(m => m.release_date?.startsWith(String(r.year))) : null;
+                const best = yearMatch || tmdbResults[0];
+                // Grab poster from TMDB (always reliable)
+                if (best.poster_url) enriched.poster_url = best.poster_url;
+                // Also fetch full TMDB details for any missing fields
+                if (best.id) {
+                  try {
+                    const details = await getMovieDetails(best.id);
+                    if (details.poster_url && !enriched.poster_url) enriched.poster_url = details.poster_url;
+                    if (!enriched.director && details.director) enriched.director = details.director;
+                    if (!enriched.cast && details.cast) enriched.cast = details.cast;
+                    if (!enriched.synopsis && details.synopsis) enriched.synopsis = details.synopsis;
+                    if (!enriched.collection || enriched.collection === "Standalone") enriched.collection = details.collection;
+                    enriched.tmdb_id = details.tmdb_id;
+                  } catch { /* TMDB detail fetch failed, AI data is still fine */ }
+                }
+              }
+            } catch { /* TMDB search failed, AI data is still fine */ }
+          }
+          setSelected(enriched);
+        }
       }
     } catch (err) {
       if (err.name !== "AbortError") setError(err.message || "Search failed.");
