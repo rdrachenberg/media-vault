@@ -6,7 +6,7 @@ const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   if (!TMDB_API_KEY) {
     return NextResponse.json(
@@ -26,7 +26,7 @@ export async function GET(
   try {
     const res = await fetch(
       `${TMDB_BASE}/movie/${movieId}?api_key=${TMDB_API_KEY}&append_to_response=credits`,
-      { next: { revalidate: 3600 } } // cache 1 hour
+      { next: { revalidate: 3600 } }
     );
 
     if (!res.ok) {
