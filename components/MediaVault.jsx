@@ -400,29 +400,31 @@ function DetailModal({ item, onClose, onDelete }) {
 }
 
 // ── Add Modal ───────────────────────────────────────────────────────────────
-function AddModal({ onAdd, onClose }) {
+function AddModal({ onAdd, onClose, initialUpc }) {
   const [query, setQuery] = useState("");
-  const [mode, setMode] = useState("tmdb");
+  const [mode, setMode] = useState(initialUpc ? "ai" : "tmdb");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [results, setResults] = useState([]);
   const [selected, setSelected] = useState(null);
   const [format, setFormat] = useState("Blu-ray");
-  const [upc, setUpc] = useState("");
+  const [upc, setUpc] = useState(initialUpc || "");
   const abortRef = useRef(null);
+  const autoSearched = useRef(false);
   const fs = { background: "rgba(255,255,255,0.05)", border: "1px solid #333", color: "#e8e8e8", padding: "8px 12px", fontSize: 13, width: "100%", fontFamily: "inherit", borderRadius: 4, outline: "none", boxSizing: "border-box" };
 
-  const doSearch = async () => {
-    if (!query.trim()) return;
+  const doSearch = async (searchQuery) => {
+    const q = (searchQuery || query).trim();
+    if (!q) return;
     setLoading(true); setError(null); setResults([]); setSelected(null);
     try {
       if (mode === "tmdb") {
-        const r = await searchMovies(query.trim());
+        const r = await searchMovies(q);
         if (r.length === 0) setError("No results. Try AI Search instead.");
         else setResults(r.slice(0, 8));
       } else {
         abortRef.current = new AbortController();
-        const r = await aiLookup(query.trim(), abortRef.current.signal);
+        const r = await aiLookup(q, abortRef.current.signal);
         if (r.found === false) setError(r.suggestion || "Not found.");
         else setSelected(r);
       }
@@ -431,6 +433,17 @@ function AddModal({ onAdd, onClose }) {
     }
     setLoading(false);
   };
+
+  // Auto-search when opened with a scanned UPC
+  useEffect(() => {
+    if (initialUpc && !autoSearched.current) {
+      autoSearched.current = true;
+      const searchTerm = `UPC barcode ${initialUpc} movie DVD Blu-ray`;
+      setQuery(searchTerm);
+      // Small delay to let modal render, then auto-search via AI
+      setTimeout(() => doSearch(searchTerm), 100);
+    }
+  }, [initialUpc]);
 
   const selectResult = async (movie) => {
     setLoading(true);
@@ -471,8 +484,8 @@ function AddModal({ onAdd, onClose }) {
         <div style={{ padding: "20px 28px" }}>
           <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
             <input type="text" value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && !loading && doSearch()}
-              placeholder={mode === "tmdb" ? "Search by title..." : "Describe the movie..."} style={{ ...fs, flex: 1, fontSize: 14, padding: "10px 14px" }} autoFocus />
-            <button onClick={doSearch} disabled={loading || !query.trim()}
+              placeholder={mode === "tmdb" ? "Search by title..." : "Describe the movie or paste UPC..."} style={{ ...fs, flex: 1, fontSize: 14, padding: "10px 14px" }} autoFocus />
+            <button onClick={() => doSearch()} disabled={loading || !query.trim()}
               style={{ background: loading ? "#333" : "#f5c518", color: loading ? "#666" : "#0a0a0a", border: "none", padding: "10px 20px", fontSize: 12, cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1, borderRadius: 4, whiteSpace: "nowrap" }}>
               {loading ? "..." : "SEARCH"}
             </button>
@@ -551,6 +564,7 @@ export default function MediaVault() {
   const [scanning, setScanning] = useState(false);
   const [selectedItem, setSelectedItem] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [scannedUpc, setScannedUpc] = useState(null);
   const [toast, setToast] = useState(null);
   const [sortBy, setSortBy] = useState("year");
   const [enriching, setEnriching] = useState(false);
@@ -616,7 +630,7 @@ export default function MediaVault() {
       && (formatFilter === "All" || m.format === formatFilter) && (collectionFilter === "All" || m.collection === collectionFilter);
   }).sort((a, b) => sortBy === "year" ? b.year - a.year : sortBy === "title" ? a.title.localeCompare(b.title) : b.runtime - a.runtime);
 
-  const handleBarcodeScan = (code) => { setScanning(false); const f = library.find(m => m.upc === code); if (f) { setSelectedItem(f); showToast(`Found: ${f.title}`, "success"); } else { showToast(`UPC ${code} not found — add it`, "warning"); setShowAddModal(true); } };
+  const handleBarcodeScan = (code) => { setScanning(false); const f = library.find(m => m.upc === code); if (f) { setSelectedItem(f); showToast(`Found: ${f.title}`, "success"); } else { setScannedUpc(code); showToast(`UPC ${code} — searching...`, "info"); setShowAddModal(true); } };
   const handleAdd = (item) => { if (library.find(m => m.upc === item.upc)) { showToast("Duplicate UPC", "warning"); return; } setLibrary(prev => [...prev, item]); setShowAddModal(false); showToast(`Added: ${item.title}`, "success"); };
   const handleDelete = (upc) => { const i = library.find(m => m.upc === upc); setLibrary(prev => prev.filter(m => m.upc !== upc)); setSelectedItem(null); showToast(`Removed: ${i?.title}`, "info"); };
 
@@ -686,7 +700,7 @@ export default function MediaVault() {
 
       {scanning && <BarcodeScanner onDetected={handleBarcodeScan} onClose={() => setScanning(false)} />}
       {selectedItem && <DetailModal item={selectedItem} onClose={() => setSelectedItem(null)} onDelete={handleDelete} />}
-      {showAddModal && <AddModal onAdd={handleAdd} onClose={() => setShowAddModal(false)} />}
+      {showAddModal && <AddModal onAdd={handleAdd} onClose={() => { setShowAddModal(false); setScannedUpc(null); }} initialUpc={scannedUpc} />}
     </div>
   );
 }
