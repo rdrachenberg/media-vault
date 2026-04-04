@@ -83,27 +83,26 @@ function AILoadingOverlay({ query }) {
   );
 }
 
-// ── Barcode Scanner (html5-qrcode — works on iOS) ───────────────────────────
+// ── Barcode Scanner (live + photo capture for iOS) ───────────────────────────
 function BarcodeScanner({ onDetected, onClose }) {
   const scannerRef = useRef(null);
-  const containerRef = useRef(null);
-  const [status, setStatus] = useState("Initializing camera...");
+  const fileInputRef = useRef(null);
+  const [status, setStatus] = useState("Initializing...");
   const [code, setCode] = useState("");
   const [detected, setDetected] = useState(false);
   const [scannerReady, setScannerReady] = useState(false);
+  const [processing, setProcessing] = useState(false);
 
+  // Live scanner
   useEffect(() => {
     let mounted = true;
-    let html5Qrcode = null;
 
-    async function startScanner() {
+    (async () => {
       try {
-        // Dynamic import — only load the library when scanner opens
         const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import("html5-qrcode");
-
         if (!mounted) return;
 
-        html5Qrcode = new Html5Qrcode("barcode-reader", {
+        const scanner = new Html5Qrcode("barcode-reader", {
           formatsToSupport: [
             Html5QrcodeSupportedFormats.EAN_13,
             Html5QrcodeSupportedFormats.UPC_A,
@@ -114,62 +113,31 @@ function BarcodeScanner({ onDetected, onClose }) {
           ],
           verbose: false,
         });
+        scannerRef.current = scanner;
 
-        scannerRef.current = html5Qrcode;
-
-        await html5Qrcode.start(
+        await scanner.start(
           { facingMode: "environment" },
-          {
-            fps: 15,
-            qrbox: (vw, vh) => ({
-              width: Math.min(vw * 0.8, 400),
-              height: Math.min(vh * 0.3, 150),
-            }),
-            aspectRatio: 1.333,
-            disableFlip: false,
-          },
+          { fps: 10, qrbox: (vw, vh) => ({ width: Math.min(vw * 0.85, 450), height: Math.min(vh * 0.35, 180) }), aspectRatio: 1.333, disableFlip: false },
           (decodedText) => {
-            if (!mounted) return;
+            if (!mounted || detected) return;
             setDetected(true);
             setStatus(`Detected: ${decodedText}`);
-            // Stop scanning and notify parent after brief feedback
-            html5Qrcode.stop().then(() => {
-              if (mounted) onDetected(decodedText);
-            }).catch(() => {
-              if (mounted) onDetected(decodedText);
-            });
+            scanner.stop().then(() => mounted && onDetected(decodedText)).catch(() => mounted && onDetected(decodedText));
           },
-          () => { /* scan miss — normal, not an error */ }
+          () => {}
         );
 
         if (mounted) {
           setScannerReady(true);
-          setStatus("Hold phone 8–12 inches from barcode");
-
-          // Apply autofocus constraints to the camera track html5-qrcode created
-          try {
-            const videoEl = document.querySelector("#barcode-reader video");
-            if (videoEl && videoEl.srcObject) {
-              const track = videoEl.srcObject.getVideoTracks()[0];
-              if (track) {
-                const caps = track.getCapabilities?.() || {};
-                const constraints = {};
-                if (caps.focusMode?.includes("continuous")) constraints.focusMode = "continuous";
-                if (caps.zoom) constraints.zoom = caps.zoom.min; // widest zoom = easier focus
-                if (Object.keys(constraints).length > 0) {
-                  await track.applyConstraints({ advanced: [constraints] });
-                }
-              }
-            }
-          } catch { /* focus constraints not supported on this device */ }
+          setStatus("Scanning... or tap 📷 to take a photo");
         }
       } catch (err) {
-        console.error("Scanner init error:", err);
-        if (mounted) setStatus("Camera unavailable — enter UPC manually");
+        if (mounted) {
+          setScannerReady(false);
+          setStatus("Live scanner unavailable — use 📷 or type UPC");
+        }
       }
-    }
-
-    startScanner();
+    })();
 
     return () => {
       mounted = false;
@@ -179,6 +147,50 @@ function BarcodeScanner({ onDetected, onClose }) {
       }
     };
   }, [onDetected]);
+
+  // Photo capture — opens native camera, decodes from image
+  const handlePhotoCapture = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setProcessing(true);
+    setStatus("Analyzing photo...");
+
+    try {
+      const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import("html5-qrcode");
+      // Stop live scanner if running
+      if (scannerRef.current) {
+        try { await scannerRef.current.stop(); } catch {}
+      }
+
+      const tempScanner = new Html5Qrcode("barcode-photo-temp", {
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.UPC_A,
+          Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+        ],
+        verbose: false,
+      });
+
+      const result = await tempScanner.scanFileV2(file, false);
+      tempScanner.clear();
+
+      if (result?.decodedText) {
+        setDetected(true);
+        setStatus(`Detected: ${result.decodedText}`);
+        setTimeout(() => onDetected(result.decodedText), 400);
+      } else {
+        setStatus("No barcode found in photo — try again closer");
+      }
+    } catch (err) {
+      setStatus("No barcode found — try a clearer photo");
+    }
+    setProcessing(false);
+    // Reset file input so same file can be re-selected
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
 
   const cleanup = () => {
     if (scannerRef.current) {
@@ -193,12 +205,12 @@ function BarcodeScanner({ onDetected, onClose }) {
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Space Mono', monospace" }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Space Mono', monospace", padding: "20px", overflowY: "auto" }}>
       <button onClick={() => { cleanup(); onClose(); }} style={{ position: "absolute", top: 20, right: 20, background: "none", border: "1px solid #ff4444", color: "#ff4444", padding: "8px 16px", cursor: "pointer", fontSize: 14, fontFamily: "inherit", letterSpacing: 2, zIndex: 10 }}>✕ Close</button>
 
-      {/* Scanner container — html5-qrcode injects its video element here */}
+      {/* Live scanner video */}
       <div style={{ width: "90%", maxWidth: 500, borderRadius: 8, overflow: "hidden", border: `2px solid ${detected ? "#10b981" : "#f5c518"}`, transition: "border-color 0.3s", position: "relative" }}>
-        <div id="barcode-reader" ref={containerRef} style={{ width: "100%" }} />
+        <div id="barcode-reader" style={{ width: "100%" }} />
         {detected && (
           <div style={{ position: "absolute", inset: 0, background: "rgba(16,185,129,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5, animation: "fadeSlideIn 0.3s ease" }}>
             <div style={{ background: "#10b981", color: "#fff", padding: "12px 24px", borderRadius: 8, fontSize: 16, fontWeight: 700, letterSpacing: 1 }}>✓ SCANNED</div>
@@ -206,21 +218,39 @@ function BarcodeScanner({ onDetected, onClose }) {
         )}
       </div>
 
-      <p style={{ color: detected ? "#10b981" : "#f5c518", marginTop: 20, fontSize: 14, letterSpacing: 1, transition: "color 0.3s" }}>{status}</p>
-      {!detected && scannerReady && (
-        <p style={{ color: "#555", fontSize: 10, marginTop: 6, letterSpacing: 0.5, textAlign: "center", maxWidth: 300 }}>
-          Tap the camera view to focus · Hold steady at arm's length
+      {/* Hidden temp element for scanFileV2 */}
+      <div id="barcode-photo-temp" style={{ display: "none" }} />
+
+      <p style={{ color: detected ? "#10b981" : "#f5c518", marginTop: 16, fontSize: 13, letterSpacing: 1, transition: "color 0.3s", textAlign: "center" }}>{status}</p>
+
+      {/* Photo capture button — opens native iOS camera */}
+      {!detected && (
+        <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
+          <button onClick={() => fileInputRef.current?.click()} disabled={processing}
+            style={{ background: "rgba(56,189,248,0.15)", border: "1px solid rgba(56,189,248,0.4)", color: "#38bdf8", padding: "10px 20px", fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1, borderRadius: 4, display: "flex", alignItems: "center", gap: 8, opacity: processing ? 0.5 : 1 }}>
+            {processing ? (
+              <><div style={{ width: 14, height: 14, border: "2px solid rgba(56,189,248,0.3)", borderTop: "2px solid #38bdf8", borderRadius: "50%", animation: "aiSpin 1s linear infinite" }} /> ANALYZING...</>
+            ) : (
+              <>📷 SNAP PHOTO</>
+            )}
+          </button>
+          <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handlePhotoCapture} style={{ display: "none" }} />
+        </div>
+      )}
+
+      {!detected && (
+        <p style={{ color: "#444", fontSize: 9, marginTop: 8, letterSpacing: 0.5, textAlign: "center", maxWidth: 280, lineHeight: 1.5 }}>
+          📷 takes a focused photo with your camera and decodes the barcode from it — most reliable on iPhone
         </p>
       )}
 
-      {/* Manual entry fallback */}
-      <div style={{ marginTop: 24, display: "flex", gap: 8 }}>
+      {/* Manual entry */}
+      <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
         <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} onKeyDown={e => e.key === "Enter" && submit()} placeholder="Enter UPC manually"
           style={{ background: "rgba(255,255,255,0.05)", border: "1px solid #444", color: "#f5c518", padding: "10px 16px", fontSize: 16, width: 220, fontFamily: "inherit", borderRadius: 4, outline: "none" }} />
         <button onClick={submit} style={{ background: "#f5c518", color: "#0a0a0a", border: "none", padding: "10px 20px", fontSize: 14, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1, borderRadius: 4 }}>LOOKUP</button>
       </div>
 
-      {/* Override html5-qrcode default styling */}
       <style>{`
         #barcode-reader { background: #0a0a14 !important; }
         #barcode-reader video { border-radius: 4px; }
