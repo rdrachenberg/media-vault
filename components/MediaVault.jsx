@@ -83,57 +83,112 @@ function AILoadingOverlay({ query }) {
   );
 }
 
-// ── Barcode Scanner (live + photo capture for iOS) ───────────────────────────
+// ── Barcode Scanner (Quagga2 — purpose-built for 1D barcodes) ────────────────
 function BarcodeScanner({ onDetected, onClose }) {
-  const scannerRef = useRef(null);
+  const scannerContainerRef = useRef(null);
   const fileInputRef = useRef(null);
-  const [status, setStatus] = useState("Initializing...");
+  const quaggaRunning = useRef(false);
+  const hasDetected = useRef(false);
+  const [status, setStatus] = useState("Initializing camera...");
   const [code, setCode] = useState("");
   const [detected, setDetected] = useState(false);
-  const [scannerReady, setScannerReady] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [liveAvailable, setLiveAvailable] = useState(true);
 
-  // Live scanner
+  // Force-stop everything
+  const forceStop = useCallback(() => {
+    try {
+      if (quaggaRunning.current) {
+        import("@ericblade/quagga2").then(({ default: Quagga }) => {
+          try { Quagga.stop(); } catch {}
+          try { Quagga.offDetected(); } catch {}
+        }).catch(() => {});
+        quaggaRunning.current = false;
+      }
+    } catch {}
+    // Also kill any leftover video streams
+    try {
+      const videos = document.querySelectorAll("#barcode-scanner-viewport video");
+      videos.forEach(v => {
+        if (v.srcObject) v.srcObject.getTracks().forEach(t => t.stop());
+      });
+    } catch {}
+  }, []);
+
+  // Close handler — guaranteed to work
+  const handleClose = useCallback(() => {
+    forceStop();
+    onClose();
+  }, [forceStop, onClose]);
+
+  // Live scanner with Quagga2
   useEffect(() => {
     let mounted = true;
 
     (async () => {
       try {
-        const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import("html5-qrcode");
+        const { default: Quagga } = await import("@ericblade/quagga2");
         if (!mounted) return;
 
-        const scanner = new Html5Qrcode("barcode-reader", {
-          formatsToSupport: [
-            Html5QrcodeSupportedFormats.EAN_13,
-            Html5QrcodeSupportedFormats.UPC_A,
-            Html5QrcodeSupportedFormats.UPC_E,
-            Html5QrcodeSupportedFormats.EAN_8,
-            Html5QrcodeSupportedFormats.CODE_128,
-            Html5QrcodeSupportedFormats.CODE_39,
-          ],
-          verbose: false,
+        await new Promise((resolve, reject) => {
+          Quagga.init({
+            inputStream: {
+              name: "Live",
+              type: "LiveStream",
+              target: document.getElementById("barcode-scanner-viewport"),
+              constraints: {
+                facingMode: "environment",
+                width: { ideal: 1280 },
+                height: { ideal: 720 },
+              },
+            },
+            decoder: {
+              readers: [
+                "ean_reader",
+                "ean_8_reader",
+                "upc_reader",
+                "upc_e_reader",
+                "code_128_reader",
+                "code_39_reader",
+              ],
+              multiple: false,
+            },
+            locate: true,
+            frequency: 10,
+          }, (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
         });
-        scannerRef.current = scanner;
 
-        await scanner.start(
-          { facingMode: "environment" },
-          { fps: 10, qrbox: (vw, vh) => ({ width: Math.min(vw * 0.85, 450), height: Math.min(vh * 0.35, 180) }), aspectRatio: 1.333, disableFlip: false },
-          (decodedText) => {
-            if (!mounted || detected) return;
-            setDetected(true);
-            setStatus(`Detected: ${decodedText}`);
-            scanner.stop().then(() => mounted && onDetected(decodedText)).catch(() => mounted && onDetected(decodedText));
-          },
-          () => {}
-        );
+        if (!mounted) return;
 
-        if (mounted) {
-          setScannerReady(true);
-          setStatus("Scanning... or tap 📷 to take a photo");
-        }
+        Quagga.start();
+        quaggaRunning.current = true;
+
+        Quagga.onDetected((result) => {
+          if (hasDetected.current) return;
+          const barcode = result?.codeResult?.code;
+          if (!barcode) return;
+
+          // Quagga2 confidence check — require multiple matching digits
+          const format = result?.codeResult?.format;
+          const validFormats = ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39"];
+          if (!validFormats.includes(format)) return;
+
+          hasDetected.current = true;
+          setDetected(true);
+          setStatus(`Detected: ${barcode}`);
+
+          try { Quagga.stop(); quaggaRunning.current = false; } catch {}
+          setTimeout(() => onDetected(barcode), 500);
+        });
+
+        if (mounted) setStatus("Scanning — hold 6–10 inches from barcode");
+
       } catch (err) {
         if (mounted) {
-          setScannerReady(false);
+          setLiveAvailable(false);
           setStatus("Live scanner unavailable — use 📷 or type UPC");
         }
       }
@@ -141,14 +196,11 @@ function BarcodeScanner({ onDetected, onClose }) {
 
     return () => {
       mounted = false;
-      if (scannerRef.current) {
-        scannerRef.current.stop().catch(() => {});
-        scannerRef.current.clear().catch(() => {});
-      }
+      forceStop();
     };
-  }, [onDetected]);
+  }, [onDetected, forceStop]);
 
-  // Photo capture — opens native camera, decodes from image
+  // Photo capture — decode barcode from a photo taken with native camera
   const handlePhotoCapture = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -156,61 +208,85 @@ function BarcodeScanner({ onDetected, onClose }) {
     setStatus("Analyzing photo...");
 
     try {
-      const { Html5Qrcode, Html5QrcodeSupportedFormats } = await import("html5-qrcode");
-      // Stop live scanner if running
-      if (scannerRef.current) {
-        try { await scannerRef.current.stop(); } catch {}
-      }
+      const { default: Quagga } = await import("@ericblade/quagga2");
 
-      const tempScanner = new Html5Qrcode("barcode-photo-temp", {
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-        ],
-        verbose: false,
+      // Convert file to data URL for Quagga
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
       });
 
-      const result = await tempScanner.scanFileV2(file, false);
-      tempScanner.clear();
+      const result = await new Promise((resolve) => {
+        Quagga.decodeSingle({
+          src: dataUrl,
+          numOfWorkers: 0,
+          decoder: {
+            readers: [
+              "ean_reader",
+              "ean_8_reader",
+              "upc_reader",
+              "upc_e_reader",
+              "code_128_reader",
+              "code_39_reader",
+            ],
+          },
+          locate: true,
+          locator: { patchSize: "large", halfSample: false },
+        }, (res) => resolve(res));
+      });
 
-      if (result?.decodedText) {
+      if (result?.codeResult?.code) {
         setDetected(true);
-        setStatus(`Detected: ${result.decodedText}`);
-        setTimeout(() => onDetected(result.decodedText), 400);
+        setStatus(`Detected: ${result.codeResult.code}`);
+        forceStop();
+        setTimeout(() => onDetected(result.codeResult.code), 500);
       } else {
-        setStatus("No barcode found in photo — try again closer");
+        setStatus("No barcode found — try holding phone further back");
       }
     } catch (err) {
-      setStatus("No barcode found — try a clearer photo");
+      setStatus("Scan failed — try a clearer photo");
     }
     setProcessing(false);
-    // Reset file input so same file can be re-selected
     if (fileInputRef.current) fileInputRef.current.value = "";
-  };
-
-  const cleanup = () => {
-    if (scannerRef.current) {
-      scannerRef.current.stop().catch(() => {});
-      scannerRef.current.clear().catch(() => {});
-    }
   };
 
   const submit = () => {
     const c = code.trim();
-    if (c.length >= 8) { cleanup(); onDetected(c); }
+    if (c.length >= 8) { forceStop(); onDetected(c); }
   };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.95)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: "'Space Mono', monospace", padding: "20px", overflowY: "auto" }}>
-      <button onClick={() => { cleanup(); onClose(); }} style={{ position: "absolute", top: 20, right: 20, background: "none", border: "1px solid #ff4444", color: "#ff4444", padding: "8px 16px", cursor: "pointer", fontSize: 14, fontFamily: "inherit", letterSpacing: 2, zIndex: 10 }}>✕ Close</button>
+    <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "#0a0a14", display: "flex", flexDirection: "column", alignItems: "center", fontFamily: "'Space Mono', monospace", overflowY: "auto" }}>
+      {/* Close button — high z-index, absolute top-right, always clickable */}
+      <button onClick={handleClose} style={{
+        position: "fixed", top: 16, right: 16, zIndex: 9999,
+        background: "rgba(0,0,0,0.8)", border: "2px solid #ff4444", color: "#ff4444",
+        padding: "10px 20px", cursor: "pointer", fontSize: 14, fontFamily: "inherit",
+        letterSpacing: 2, borderRadius: 6, backdropFilter: "blur(4px)",
+        WebkitTapHighlightColor: "rgba(255,68,68,0.3)",
+      }}>✕ CLOSE</button>
 
-      {/* Live scanner video */}
-      <div style={{ width: "90%", maxWidth: 500, borderRadius: 8, overflow: "hidden", border: `2px solid ${detected ? "#10b981" : "#f5c518"}`, transition: "border-color 0.3s", position: "relative" }}>
-        <div id="barcode-reader" style={{ width: "100%" }} />
+      {/* Live scanner viewport */}
+      <div style={{
+        width: "100%", maxWidth: 500, aspectRatio: "4/3", position: "relative",
+        overflow: "hidden", border: `2px solid ${detected ? "#10b981" : "#f5c518"}`,
+        borderRadius: 8, marginTop: 60, background: "#000",
+        transition: "border-color 0.3s",
+      }}>
+        <div id="barcode-scanner-viewport" ref={scannerContainerRef} style={{
+          width: "100%", height: "100%", position: "relative",
+        }} />
+        {/* Scanning guide overlay */}
+        {!detected && liveAvailable && (
+          <div style={{ position: "absolute", inset: 0, pointerEvents: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{
+              width: "80%", height: "30%", border: "2px solid rgba(245,197,24,0.5)",
+              borderRadius: 4, boxShadow: "0 0 0 9999px rgba(0,0,0,0.3)",
+            }} />
+          </div>
+        )}
         {detected && (
           <div style={{ position: "absolute", inset: 0, background: "rgba(16,185,129,0.3)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5, animation: "fadeSlideIn 0.3s ease" }}>
             <div style={{ background: "#10b981", color: "#fff", padding: "12px 24px", borderRadius: 8, fontSize: 16, fontWeight: 700, letterSpacing: 1 }}>✓ SCANNED</div>
@@ -218,46 +294,45 @@ function BarcodeScanner({ onDetected, onClose }) {
         )}
       </div>
 
-      {/* Hidden temp element for scanFileV2 */}
-      <div id="barcode-photo-temp" style={{ display: "none" }} />
+      {/* Status */}
+      <p style={{ color: detected ? "#10b981" : "#f5c518", marginTop: 16, fontSize: 13, letterSpacing: 1, textAlign: "center", padding: "0 20px" }}>{status}</p>
 
-      <p style={{ color: detected ? "#10b981" : "#f5c518", marginTop: 16, fontSize: 13, letterSpacing: 1, transition: "color 0.3s", textAlign: "center" }}>{status}</p>
-
-      {/* Photo capture button — opens native iOS camera */}
+      {/* Photo capture — most reliable on iPhone */}
       {!detected && (
-        <div style={{ marginTop: 16, display: "flex", gap: 10 }}>
+        <div style={{ marginTop: 16, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
           <button onClick={() => fileInputRef.current?.click()} disabled={processing}
-            style={{ background: "rgba(56,189,248,0.15)", border: "1px solid rgba(56,189,248,0.4)", color: "#38bdf8", padding: "10px 20px", fontSize: 12, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1, borderRadius: 4, display: "flex", alignItems: "center", gap: 8, opacity: processing ? 0.5 : 1 }}>
+            style={{
+              background: "rgba(56,189,248,0.15)", border: "1px solid rgba(56,189,248,0.4)",
+              color: "#38bdf8", padding: "12px 28px", fontSize: 13, cursor: "pointer",
+              fontFamily: "inherit", fontWeight: 700, letterSpacing: 1.5, borderRadius: 6,
+              display: "flex", alignItems: "center", gap: 10, opacity: processing ? 0.5 : 1,
+              WebkitTapHighlightColor: "rgba(56,189,248,0.2)",
+            }}>
             {processing ? (
               <><div style={{ width: 14, height: 14, border: "2px solid rgba(56,189,248,0.3)", borderTop: "2px solid #38bdf8", borderRadius: "50%", animation: "aiSpin 1s linear infinite" }} /> ANALYZING...</>
             ) : (
-              <>📷 SNAP PHOTO</>
+              <>📷 TAKE PHOTO (best for iPhone)</>
             )}
           </button>
           <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handlePhotoCapture} style={{ display: "none" }} />
+          <p style={{ color: "#444", fontSize: 9, letterSpacing: 0.5, textAlign: "center", maxWidth: 280, lineHeight: 1.5, margin: 0 }}>
+            Opens your camera app — take a focused photo of the barcode
+          </p>
         </div>
       )}
 
-      {!detected && (
-        <p style={{ color: "#444", fontSize: 9, marginTop: 8, letterSpacing: 0.5, textAlign: "center", maxWidth: 280, lineHeight: 1.5 }}>
-          📷 takes a focused photo with your camera and decodes the barcode from it — most reliable on iPhone
-        </p>
-      )}
-
-      {/* Manual entry */}
-      <div style={{ marginTop: 16, display: "flex", gap: 8 }}>
-        <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} onKeyDown={e => e.key === "Enter" && submit()} placeholder="Enter UPC manually"
+      {/* Manual UPC entry */}
+      <div style={{ marginTop: 20, display: "flex", gap: 8, padding: "0 20px" }}>
+        <input type="text" value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))}
+          onKeyDown={e => e.key === "Enter" && submit()} placeholder="Type UPC numbers"
           style={{ background: "rgba(255,255,255,0.05)", border: "1px solid #444", color: "#f5c518", padding: "10px 16px", fontSize: 16, width: 220, fontFamily: "inherit", borderRadius: 4, outline: "none" }} />
         <button onClick={submit} style={{ background: "#f5c518", color: "#0a0a0a", border: "none", padding: "10px 20px", fontSize: 14, cursor: "pointer", fontFamily: "inherit", fontWeight: 700, letterSpacing: 1, borderRadius: 4 }}>LOOKUP</button>
       </div>
 
+      {/* Quagga2 injects canvas/video, style them */}
       <style>{`
-        #barcode-reader { background: #0a0a14 !important; }
-        #barcode-reader video { border-radius: 4px; }
-        #barcode-reader img[alt="Info icon"] { display: none !important; }
-        #barcode-reader__scan_region { background: transparent !important; }
-        #barcode-reader__dashboard { display: none !important; }
-        #barcode-reader__header_message { color: #888 !important; font-size: 11px !important; font-family: 'Space Mono', monospace !important; }
+        #barcode-scanner-viewport video { width: 100% !important; height: 100% !important; object-fit: cover !important; }
+        #barcode-scanner-viewport canvas.drawingBuffer { display: none !important; }
       `}</style>
     </div>
   );
