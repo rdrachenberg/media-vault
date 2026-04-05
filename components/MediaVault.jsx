@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { searchMovies, getMovieDetails, aiLookup } from "@/lib/api";
+import { searchMovies, getMovieDetails, aiLookup, lookupUPC } from "@/lib/api";
 import { STAR_WARS_SEED } from "@/lib/seed-data";
 
 const FORMATS = ["All", "DVD", "Blu-ray", "VHS", "4K UHD"];
@@ -465,13 +465,59 @@ function AddModal({ onAdd, onClose, initialUpc }) {
 
   // Auto-search when opened with a scanned UPC
   useEffect(() => {
-    if (initialUpc && !autoSearched.current) {
-      autoSearched.current = true;
-      const searchTerm = `UPC barcode ${initialUpc} movie DVD Blu-ray`;
-      setQuery(searchTerm);
-      // Small delay to let modal render, then auto-search via AI
-      setTimeout(() => doSearch(searchTerm), 100);
-    }
+    if (!initialUpc || autoSearched.current) return;
+    autoSearched.current = true;
+    let cancelled = false;
+
+    (async () => {
+      setLoading(true);
+      setQuery(`Looking up UPC ${initialUpc}...`);
+
+      try {
+        // Step 1: UPC → product title → TMDB (all server-side)
+        const result = await lookupUPC(initialUpc);
+
+        if (cancelled) return;
+
+        if (result.found) {
+          // Got full movie data with poster from TMDB
+          setSelected(result);
+          setQuery(result.title);
+          setLoading(false);
+          return;
+        }
+
+        // UPC found a product but no TMDB match — try searching TMDB with product title
+        if (result.product_title) {
+          setQuery(result.product_title);
+          setMode("tmdb");
+          try {
+            const tmdbResults = await searchMovies(result.product_title);
+            if (!cancelled && tmdbResults.length > 0) {
+              setResults(tmdbResults.slice(0, 8));
+              setLoading(false);
+              return;
+            }
+          } catch { /* fall through */ }
+        }
+
+        // Nothing worked — let user search manually
+        if (!cancelled) {
+          setQuery("");
+          setMode("tmdb");
+          setError(result.suggestion || `UPC ${initialUpc} not found. Search by movie title instead.`);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setQuery("");
+          setMode("tmdb");
+          setError(`Lookup failed — search by movie title instead.`);
+        }
+      }
+      if (!cancelled) setLoading(false);
+    })();
+
+    return () => { cancelled = true; };
   }, [initialUpc]);
 
   const selectResult = async (movie) => {
@@ -519,8 +565,8 @@ function AddModal({ onAdd, onClose, initialUpc }) {
               {loading ? "..." : "SEARCH"}
             </button>
           </div>
-          {loading && mode === "ai" && <AILoadingOverlay query={query} />}
-          {loading && mode === "tmdb" && <div style={{ textAlign: "center", padding: 30 }}><div style={{ width: 28, height: 28, margin: "0 auto", border: "2px solid rgba(245,197,24,0.2)", borderTop: "2px solid #f5c518", borderRadius: "50%", animation: "aiSpin 1s linear infinite" }} /><p style={{ color: "#666", fontSize: 11, marginTop: 12 }}>Searching TMDB...</p></div>}
+          {loading && mode === "ai" && !initialUpc && <AILoadingOverlay query={query} />}
+          {loading && (mode === "tmdb" || initialUpc) && <div style={{ textAlign: "center", padding: 30 }}><div style={{ width: 28, height: 28, margin: "0 auto", border: "2px solid rgba(245,197,24,0.2)", borderTop: "2px solid #f5c518", borderRadius: "50%", animation: "aiSpin 1s linear infinite" }} /><p style={{ color: "#666", fontSize: 11, marginTop: 12 }}>{initialUpc ? `Looking up UPC ${initialUpc}...` : "Searching TMDB..."}</p></div>}
           {error && <div style={{ background: "rgba(255,68,68,0.08)", border: "1px solid rgba(255,68,68,0.2)", borderRadius: 6, padding: "14px 16px", marginBottom: 16 }}><p style={{ color: "#ff6b6b", fontSize: 12, margin: 0 }}>{error}</p></div>}
 
           {results.length > 0 && !selected && !loading && (
