@@ -89,11 +89,15 @@ function BarcodeScanner({ onDetected, onClose }) {
   const fileInputRef = useRef(null);
   const quaggaRunning = useRef(false);
   const hasDetected = useRef(false);
+  const onDetectedRef = useRef(onDetected);
   const [status, setStatus] = useState("Initializing camera...");
   const [code, setCode] = useState("");
   const [detected, setDetected] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [liveAvailable, setLiveAvailable] = useState(true);
+
+  // Keep ref in sync without re-triggering effects
+  useEffect(() => { onDetectedRef.current = onDetected; }, [onDetected]);
 
   // Force-stop everything
   const forceStop = useCallback(() => {
@@ -181,7 +185,7 @@ function BarcodeScanner({ onDetected, onClose }) {
           setStatus(`Detected: ${barcode}`);
 
           try { Quagga.stop(); quaggaRunning.current = false; } catch {}
-          setTimeout(() => onDetected(barcode), 500);
+          setTimeout(() => onDetectedRef.current(barcode), 500);
         });
 
         if (mounted) setStatus("Scanning — hold 6–10 inches from barcode");
@@ -198,7 +202,7 @@ function BarcodeScanner({ onDetected, onClose }) {
       mounted = false;
       forceStop();
     };
-  }, [onDetected, forceStop]);
+  }, [forceStop]);
 
   // Photo capture — decode barcode from a photo taken with native camera
   const handlePhotoCapture = async (e) => {
@@ -241,7 +245,7 @@ function BarcodeScanner({ onDetected, onClose }) {
         setDetected(true);
         setStatus(`Detected: ${result.codeResult.code}`);
         forceStop();
-        setTimeout(() => onDetected(result.codeResult.code), 500);
+        setTimeout(() => onDetectedRef.current(result.codeResult.code), 500);
       } else {
         setStatus("No barcode found — try holding phone further back");
       }
@@ -254,7 +258,7 @@ function BarcodeScanner({ onDetected, onClose }) {
 
   const submit = () => {
     const c = code.trim();
-    if (c.length >= 8) { forceStop(); onDetected(c); }
+    if (c.length >= 8) { forceStop(); onDetectedRef.current(c); }
   };
 
   return (
