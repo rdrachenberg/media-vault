@@ -33,24 +33,59 @@ async function lookupUPC(upc: string): Promise<string | null> {
 async function searchTMDB(title: string): Promise<any | null> {
   if (!TMDB_API_KEY) return null;
 
-  // Clean up the product title — remove format info, edition text, etc.
-  const cleanTitle = title
-    .replace(/\b(blu[- ]?ray|dvd|4k|uhd|digital|widescreen|fullscreen)\b/gi, "")
-    .replace(/\b(special|collector'?s?|limited|anniversary|deluxe)\s*(edition|ed\.?)\b/gi, "")
-    .replace(/\b(2[- ]?disc|3[- ]?disc|combo|pack|set)\b/gi, "")
-    .replace(/\[.*?\]|\(.*?\)/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  // Aggressively clean product titles from UPC databases
+  // Examples: "Dvd - Michael Clayton & Sealed" → "Michael Clayton"
+  //           "Star Wars Episode IV Blu-Ray 2-Disc Special Edition [New]" → "Star Wars Episode IV"
+  function cleanProductTitle(raw: string): string {
+    return raw
+      // Remove leading format labels like "Dvd - ", "Blu-ray - ", "DVD:", etc.
+      .replace(/^(blu[- ]?ray|dvd|4k|uhd|vhs|hd[- ]?dvd)\s*[-:]\s*/gi, "")
+      // Remove trailing condition/state like "& Sealed", "- New", "(Used)", "/ New"
+      .replace(/\s*[&/\-]\s*(sealed|new|used|opened|mint|like new|very good|good|acceptable)\s*$/gi, "")
+      // Remove format mentions anywhere
+      .replace(/\b(blu[- ]?ray|dvd|4k|uhd|digital|widescreen|fullscreen|hd[- ]?dvd|vhs|laserdisc)\b/gi, "")
+      // Remove edition labels
+      .replace(/\b(special|collector'?s?|limited|anniversary|deluxe|platinum|diamond|ultimate|theatrical|unrated|extended|director'?s?\s*cut)\s*(edition|ed\.?|version|ver\.?)?\b/gi, "")
+      // Remove disc/pack info
+      .replace(/\b(\d[- ]?disc|combo|pack|set|box\s*set|trilogy|collection|complete)\b/gi, "")
+      // Remove bracketed/parenthesized text like [New], (Widescreen), [Blu-ray]
+      .replace(/\[.*?\]|\(.*?\)/g, "")
+      // Remove region codes
+      .replace(/\b(region\s*[0-9a-z]+)\b/gi, "")
+      // Clean up leftover punctuation and whitespace
+      .replace(/\s*[-–—:,/&]\s*$/g, "")  // trailing separators
+      .replace(/^\s*[-–—:,/&]\s*/g, "")  // leading separators
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
-  const searchRes = await fetch(
-    `${TMDB_BASE}/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(cleanTitle)}&include_adult=false`
-  );
-  if (!searchRes.ok) return null;
-  const searchData = await searchRes.json();
-  if (!searchData.results?.length) return null;
+  // Try progressively simpler search queries
+  const cleanTitle = cleanProductTitle(title);
+  const searchQueries = [
+    cleanTitle,
+    // Drop anything after a colon or dash (often subtitle/edition)
+    cleanTitle.split(/[-–—:]/)[0].trim(),
+    // First 3 words only
+    cleanTitle.split(/\s+/).slice(0, 3).join(" "),
+  ].filter((q, i, arr) => q.length > 2 && arr.indexOf(q) === i); // dedupe, skip empty
 
-  // Get full details for the top result
-  const movieId = searchData.results[0].id;
+  let movieId: number | null = null;
+
+  for (const query of searchQueries) {
+    const searchRes = await fetch(
+      `${TMDB_BASE}/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(query)}&include_adult=false`
+    );
+    if (!searchRes.ok) continue;
+    const searchData = await searchRes.json();
+    if (searchData.results?.length) {
+      movieId = searchData.results[0].id;
+      break;
+    }
+  }
+
+  if (!movieId) return null;
+
+  // Get full details for the matched movie
   const detailRes = await fetch(
     `${TMDB_BASE}/movie/${movieId}?api_key=${TMDB_API_KEY}&append_to_response=credits`
   );

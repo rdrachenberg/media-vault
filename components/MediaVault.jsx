@@ -487,12 +487,20 @@ function AddModal({ onAdd, onClose, initialUpc }) {
           return;
         }
 
-        // UPC found a product but no TMDB match — try searching TMDB with product title
+        // UPC found a product but no TMDB match — clean the title and try TMDB
         if (result.product_title) {
-          setQuery(result.product_title);
+          // Client-side cleanup in case server missed something
+          const cleaned = result.product_title
+            .replace(/^(blu[- ]?ray|dvd|4k|uhd|vhs)\s*[-:]\s*/gi, "")
+            .replace(/\s*[&/\-]\s*(sealed|new|used)\s*$/gi, "")
+            .replace(/\b(blu[- ]?ray|dvd|4k|uhd|widescreen|fullscreen)\b/gi, "")
+            .replace(/\[.*?\]|\(.*?\)/g, "")
+            .replace(/\s+/g, " ").trim();
+          
+          setQuery(cleaned);
           setMode("tmdb");
           try {
-            const tmdbResults = await searchMovies(result.product_title);
+            const tmdbResults = await searchMovies(cleaned);
             if (!cancelled && tmdbResults.length > 0) {
               setResults(tmdbResults.slice(0, 8));
               setLoading(false);
