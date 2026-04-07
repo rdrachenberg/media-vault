@@ -1,39 +1,37 @@
-import { MongoClient } from "mongodb";
+import { MongoClient, Db, Collection } from "mongodb";
 
-const MONGODB_URI = process.env.MONGODB_URI;
+// Lazy connection — only connects when getCollection() is called,
+// NOT at import time. This prevents build-time errors on Vercel
+// where env vars aren't available during static page generation.
 
-if (!MONGODB_URI) {
-  throw new Error("MONGODB_URI environment variable is not set");
-}
-
-let client: MongoClient;
-let clientPromise: Promise<MongoClient>;
-
-// Cache the connection in development to survive hot reloads
-// In production, this runs once per cold start
 const globalWithMongo = global as typeof globalThis & {
   _mongoClientPromise?: Promise<MongoClient>;
 };
 
-if (process.env.NODE_ENV === "development") {
-  if (!globalWithMongo._mongoClientPromise) {
-    client = new MongoClient(MONGODB_URI);
-    globalWithMongo._mongoClientPromise = client.connect();
+function getClientPromise(): Promise<MongoClient> {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error("MONGODB_URI environment variable is not set");
   }
-  clientPromise = globalWithMongo._mongoClientPromise;
-} else {
-  client = new MongoClient(MONGODB_URI);
-  clientPromise = client.connect();
+
+  if (process.env.NODE_ENV === "development") {
+    // Cache in dev to survive hot reloads
+    if (!globalWithMongo._mongoClientPromise) {
+      globalWithMongo._mongoClientPromise = new MongoClient(uri).connect();
+    }
+    return globalWithMongo._mongoClientPromise;
+  }
+
+  // Production: new connection per cold start
+  return new MongoClient(uri).connect();
 }
 
-export default clientPromise;
-
-export async function getDb(dbName = "media-vault") {
-  const client = await clientPromise;
+export async function getDb(dbName = "media-vault"): Promise<Db> {
+  const client = await getClientPromise();
   return client.db(dbName);
 }
 
-export async function getCollection(collectionName = "library") {
+export async function getCollection(collectionName = "library"): Promise<Collection> {
   const db = await getDb();
   return db.collection(collectionName);
 }
