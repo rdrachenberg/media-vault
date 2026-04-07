@@ -1,7 +1,7 @@
-"use client";
-
 import dynamic from "next/dynamic";
 
+// Client-only — no SSR. Prevents hydration mismatches from
+// BarcodeDetector checks, camera APIs, and dynamic poster loading.
 const MediaVault = dynamic(() => import("@/components/MediaVault"), {
   ssr: false,
   loading: () => (

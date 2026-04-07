@@ -35,6 +35,11 @@ env-check: ## Verify API keys are set
 		else \
 			echo "  ✅ ANTHROPIC_API_KEY configured"; \
 		fi; \
+		if grep -q "username:password" .env.local; then \
+			echo "  ⚠  MONGODB_URI not set"; \
+		else \
+			echo "  ✅ MONGODB_URI configured"; \
+		fi; \
 	else \
 		echo "  ❌ .env.local missing — run: make setup"; \
 	fi
@@ -67,6 +72,14 @@ deploy-preview: ## Deploy preview to Vercel
 
 clean: ## Remove build artifacts + node_modules
 	rm -rf .next node_modules out
+	@echo "🧹 Cleaned"
+
+seed: ## Seed the database with Star Wars collection
+	@echo "🌱 Seeding database..."
+	@curl -s -X POST http://localhost:3000/api/library/seed | node -e "process.stdin.on('data',d=>console.log(JSON.parse(d).message))"
+
+db-count: ## Show number of items in library
+	@curl -s http://localhost:3000/api/library | node -e "process.stdin.on('data',d=>{const j=JSON.parse(d);console.log(j.items?.length+' items in library')})"
 	@echo "🧹 Cleaned"
 
 logs: ## Tail Vercel production logs

@@ -9,8 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@ericblade/quagga2": "^1.12.1",
-    "next": "^15.5.14",
+    "@ericblade/quagga2": "^1.8.0",
+    "mongodb": "^6.21.0",
+    "next": "^15.5.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0"
   },

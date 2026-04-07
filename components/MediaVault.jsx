@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { searchMovies, getMovieDetails, aiLookup, lookupUPC } from "@/lib/api";
-import { STAR_WARS_SEED } from "@/lib/seed-data";
+import { searchMovies, getMovieDetails, aiLookup, lookupUPC, fetchLibrary, addToLibrary, removeFromLibrary, seedLibrary } from "@/lib/api";
 
 const FORMATS = ["All", "DVD", "Blu-ray", "VHS", "4K UHD"];
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
@@ -644,7 +643,7 @@ function AddModal({ onAdd, onClose, initialUpc }) {
 
 // ── Main App ────────────────────────────────────────────────────────────────
 export default function MediaVault() {
-  const [library, setLibrary] = useState(STAR_WARS_SEED);
+  const [library, setLibrary] = useState([]);
   const [search, setSearch] = useState("");
   const [formatFilter, setFormatFilter] = useState("All");
   const [collectionFilter, setCollectionFilter] = useState("All");
@@ -654,58 +653,50 @@ export default function MediaVault() {
   const [scannedUpc, setScannedUpc] = useState(null);
   const [toast, setToast] = useState(null);
   const [sortBy, setSortBy] = useState("year");
-  const [enriching, setEnriching] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const showToast = useCallback((msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); }, []);
 
-  // Auto-fetch poster URLs for seed items on mount — sequential for reliability
+  // Load library from MongoDB on mount — seed if empty, then enrich posters
   useEffect(() => {
     let cancelled = false;
-    async function enrichPosters() {
-      const seenIds = new Set();
-      const toFetch = [];
-      for (const item of STAR_WARS_SEED) {
-        if (!item.poster_url && item.tmdb_id && !seenIds.has(item.tmdb_id)) {
-          seenIds.add(item.tmdb_id);
-          toFetch.push(item);
-        }
-      }
-      if (toFetch.length === 0) return;
-      setEnriching(true);
-      const posterMap = {};
 
-      // Fetch one at a time — more reliable on mobile connections
-      for (const item of toFetch) {
-        if (cancelled) break;
-        try {
-          const detail = await getMovieDetails(item.tmdb_id);
-          if (detail?.poster_url) {
-            posterMap[item.tmdb_id] = detail.poster_url;
-            // Update library incrementally so posters appear as they load
-            if (!cancelled) {
-              setLibrary(prev => prev.map(m =>
-                !m.poster_url && m.tmdb_id === item.tmdb_id ? { ...m, poster_url: detail.poster_url } : m
-              ));
-            }
-          }
-        } catch (err) {
-          console.warn(`Failed to fetch poster for ${item.title}:`, err);
-          // Retry once after a short delay
+    async function loadLibrary() {
+      setLoading(true);
+      try {
+        // Try to load from DB
+        let items = await fetchLibrary();
+
+        // If DB is empty, seed it with Star Wars collection
+        if (items.length === 0) {
+          await seedLibrary();
+          items = await fetchLibrary();
+        }
+
+        if (!cancelled) setLibrary(items);
+
+        // Enrich missing posters from TMDB
+        const needPosters = items.filter(m => !m.poster_url && m.tmdb_id);
+        const seenIds = new Set();
+        for (const item of needPosters) {
+          if (cancelled || seenIds.has(item.tmdb_id)) continue;
+          seenIds.add(item.tmdb_id);
           try {
-            await new Promise(r => setTimeout(r, 1000));
             const detail = await getMovieDetails(item.tmdb_id);
             if (detail?.poster_url && !cancelled) {
-              posterMap[item.tmdb_id] = detail.poster_url;
               setLibrary(prev => prev.map(m =>
                 !m.poster_url && m.tmdb_id === item.tmdb_id ? { ...m, poster_url: detail.poster_url } : m
               ));
             }
-          } catch { /* give up on this one */ }
+          } catch { /* skip this poster */ }
         }
+      } catch (err) {
+        if (!cancelled) showToast("Failed to load library", "warning");
       }
-      if (!cancelled) setEnriching(false);
+      if (!cancelled) setLoading(false);
     }
-    enrichPosters();
+
+    loadLibrary();
     return () => { cancelled = true; };
   }, []);
 
@@ -718,8 +709,30 @@ export default function MediaVault() {
   }).sort((a, b) => sortBy === "year" ? b.year - a.year : sortBy === "title" ? a.title.localeCompare(b.title) : b.runtime - a.runtime);
 
   const handleBarcodeScan = (code) => { setScanning(false); const f = library.find(m => m.upc === code); if (f) { setSelectedItem(f); showToast(`Found: ${f.title}`, "success"); } else { setScannedUpc(code); showToast(`UPC ${code} — searching...`, "info"); setShowAddModal(true); } };
-  const handleAdd = (item) => { if (library.find(m => m.upc === item.upc)) { showToast("Duplicate UPC", "warning"); return; } setLibrary(prev => [...prev, item]); setShowAddModal(false); showToast(`Added: ${item.title}`, "success"); };
-  const handleDelete = (upc) => { const i = library.find(m => m.upc === upc); setLibrary(prev => prev.filter(m => m.upc !== upc)); setSelectedItem(null); showToast(`Removed: ${i?.title}`, "info"); };
+
+  const handleAdd = async (item) => {
+    if (library.find(m => m.upc === item.upc)) { showToast("Duplicate UPC", "warning"); return; }
+    try {
+      const saved = await addToLibrary(item);
+      setLibrary(prev => [saved, ...prev]);
+      setShowAddModal(false);
+      showToast(`Added: ${item.title}`, "success");
+    } catch (err) {
+      showToast(err.message || "Failed to save", "warning");
+    }
+  };
+
+  const handleDelete = async (upc) => {
+    const item = library.find(m => m.upc === upc);
+    try {
+      await removeFromLibrary(upc);
+      setLibrary(prev => prev.filter(m => m.upc !== upc));
+      setSelectedItem(null);
+      showToast(`Removed: ${item?.title}`, "info");
+    } catch (err) {
+      showToast(err.message || "Failed to remove", "warning");
+    }
+  };
 
   const stats = { total: library.length, dvd: library.filter(m => m.format === "DVD").length, bluray: library.filter(m => m.format === "Blu-ray").length, vhs: library.filter(m => m.format === "VHS").length, runtime: library.reduce((a, m) => a + m.runtime, 0) };
 
@@ -729,7 +742,7 @@ export default function MediaVault() {
 
       {toast && <div style={{ position: "fixed", top: 20, left: "50%", transform: "translateX(-50%)", zIndex: 2000, padding: "10px 24px", borderRadius: 6, background: toast.type === "success" ? "#065f46" : toast.type === "warning" ? "#78350f" : "#1e293b", border: `1px solid ${toast.type === "success" ? "#10b981" : toast.type === "warning" ? "#f59e0b" : "#475569"}`, color: "#fff", fontSize: 13, letterSpacing: 0.5, animation: "toastIn 0.3s ease", boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}>{toast.msg}</div>}
 
-      {enriching && (
+      {loading && (
         <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 1500, height: 3, background: "rgba(245,197,24,0.1)", overflow: "hidden" }}>
           <div style={{ height: "100%", width: "30%", background: "#f5c518", borderRadius: 2, animation: "enrichSlide 1.2s ease-in-out infinite" }} />
           <style>{`@keyframes enrichSlide { 0% { transform: translateX(-100%) } 100% { transform: translateX(433%) } }`}</style>
