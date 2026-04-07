@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { searchMovies, getMovieDetails, aiLookup, lookupUPC, fetchLibrary, addToLibrary, removeFromLibrary, seedLibrary } from "@/lib/api";
+import { searchMovies, getMovieDetails, aiLookup, lookupUPC, fetchLibrary, addToLibrary, removeFromLibrary, updateInLibrary, seedLibrary } from "@/lib/api";
 
 const FORMATS = ["All", "DVD", "Blu-ray", "VHS", "4K UHD"];
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
@@ -657,14 +657,13 @@ export default function MediaVault() {
 
   const showToast = useCallback((msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); }, []);
 
-  // Load library from MongoDB on mount — seed if empty, then enrich posters
+  // Load library from MongoDB on mount — seed if empty, enrich posters once
   useEffect(() => {
     let cancelled = false;
 
     async function loadLibrary() {
       setLoading(true);
       try {
-        // Try to load from DB
         let items = await fetchLibrary();
 
         // If DB is empty, seed it with Star Wars collection
@@ -675,7 +674,7 @@ export default function MediaVault() {
 
         if (!cancelled) setLibrary(items);
 
-        // Enrich missing posters from TMDB
+        // Enrich missing posters from TMDB and SAVE back to DB
         const needPosters = items.filter(m => !m.poster_url && m.tmdb_id);
         const seenIds = new Set();
         for (const item of needPosters) {
@@ -684,9 +683,15 @@ export default function MediaVault() {
           try {
             const detail = await getMovieDetails(item.tmdb_id);
             if (detail?.poster_url && !cancelled) {
+              // Update UI immediately
               setLibrary(prev => prev.map(m =>
                 !m.poster_url && m.tmdb_id === item.tmdb_id ? { ...m, poster_url: detail.poster_url } : m
               ));
+              // Persist to MongoDB — next load won't need to re-fetch
+              // Update all items with this tmdb_id
+              for (const m of items.filter(m => !m.poster_url && m.tmdb_id === item.tmdb_id)) {
+                updateInLibrary(m.upc, { poster_url: detail.poster_url }).catch(() => {});
+              }
             }
           } catch { /* skip this poster */ }
         }

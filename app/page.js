@@ -1,3 +1,5 @@
+"use client";
+
 import dynamic from "next/dynamic";
 
 // Client-only — no SSR. Prevents hydration mismatches from

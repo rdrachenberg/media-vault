@@ -6,7 +6,7 @@ const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   if (!TMDB_API_KEY) {
     return NextResponse.json(
@@ -15,7 +15,7 @@ export async function GET(
     );
   }
 
-  const movieId = params.id;
+  const { id: movieId } = await params;
   if (!movieId || isNaN(Number(movieId))) {
     return NextResponse.json(
       { error: "Invalid movie ID" },
