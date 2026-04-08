@@ -654,10 +654,71 @@ export default function MediaVault() {
   const [toast, setToast] = useState(null);
   const [sortBy, setSortBy] = useState("year");
   const [loading, setLoading] = useState(true);
+  const [hasMounted, setHasMounted] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
+  const [showMobileScanButton, setShowMobileScanButton] = useState(true);
+  const lastScrollY = useRef(0);
 
   const showToast = useCallback((msg, type = "info") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3500); }, []);
 
   // Load library from MongoDB on mount — seed if empty, enrich posters once
+  useEffect(() => {
+    setHasMounted(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hasMounted) return;
+
+    const mediaQuery = window.matchMedia("(max-width: 768px)");
+
+    const updateViewport = () => {
+      const mobile = mediaQuery.matches;
+      setIsMobileViewport(mobile);
+      setShowMobileScanButton(prev => (mobile ? prev : false));
+      if (!mobile) lastScrollY.current = 0;
+    };
+
+    const handleScroll = () => {
+      if (!mediaQuery.matches) return;
+
+      const currentScrollY = window.scrollY || window.pageYOffset || 0;
+
+      if (currentScrollY <= 40) {
+        setShowMobileScanButton(true);
+        lastScrollY.current = currentScrollY;
+        return;
+      }
+
+      const delta = currentScrollY - lastScrollY.current;
+      if (Math.abs(delta) < 8) return;
+
+      if (delta > 0) setShowMobileScanButton(false);
+      if (delta < 0) setShowMobileScanButton(true);
+
+      lastScrollY.current = currentScrollY;
+    };
+
+    updateViewport();
+    handleScroll();
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", updateViewport);
+    } else {
+      mediaQuery.addListener(updateViewport);
+    }
+
+    window.addEventListener("scroll", handleScroll, { passive: true });
+
+    return () => {
+      if (typeof mediaQuery.removeEventListener === "function") {
+        mediaQuery.removeEventListener("change", updateViewport);
+      } else {
+        mediaQuery.removeListener(updateViewport);
+      }
+      window.removeEventListener("scroll", handleScroll);
+    };
+  }, [hasMounted]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -762,7 +823,9 @@ export default function MediaVault() {
               <p style={{ color: "#555", fontSize: 11, margin: "4px 0 0", letterSpacing: 3, textTransform: "uppercase" }}>AI-Powered Physical Media Catalog</p>
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={() => setScanning(true)} style={{ background: "#f5c518", color: "#0a0a0a", border: "none", padding: "10px 20px", fontSize: 12, cursor: "pointer", fontWeight: 700, letterSpacing: 1.5, borderRadius: 4, display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 16 }}>⊞</span> SCAN</button>
+              {(!hasMounted || !isMobileViewport) && (
+                <button onClick={() => setScanning(true)} style={{ background: "#f5c518", color: "#0a0a0a", border: "none", padding: "10px 20px", fontSize: 12, cursor: "pointer", fontWeight: 700, letterSpacing: 1.5, borderRadius: 4, display: "flex", alignItems: "center", gap: 8 }}><span style={{ fontSize: 16 }}>⊞</span> SCAN</button>
+              )}
               <button onClick={() => setShowAddModal(true)} style={{ background: "linear-gradient(135deg,rgba(245,197,24,0.15),rgba(245,197,24,0.05))", color: "#f5c518", border: "1px solid rgba(245,197,24,0.3)", padding: "10px 20px", fontSize: 12, cursor: "pointer", fontWeight: 700, letterSpacing: 1.5, borderRadius: 4, display: "flex", alignItems: "center", gap: 8 }}>+ ADD</button>
             </div>
           </div>
@@ -793,7 +856,7 @@ export default function MediaVault() {
         </div>
       </div>
 
-      <main style={{ padding: 24, maxWidth: 1100, margin: "0 auto" }}>
+      <main style={{ padding: 24, paddingBottom: hasMounted && isMobileViewport ? 110 : 24, maxWidth: 1100, margin: "0 auto" }}>
         {filtered.length === 0 ? (
           <div style={{ textAlign: "center", padding: 60, color: "#444" }}><div style={{ fontSize: 48, marginBottom: 16 }}>📼</div><p style={{ fontSize: 14, letterSpacing: 1 }}>No titles found</p></div>
         ) : (
@@ -802,6 +865,41 @@ export default function MediaVault() {
           </div>
         )}
       </main>
+
+      {hasMounted && isMobileViewport && !scanning && (
+        <button
+          onClick={() => setScanning(true)}
+          aria-label="Scan barcode"
+          style={{
+            position: "fixed",
+            left: 16,
+            right: 16,
+            bottom: 16,
+            zIndex: 1200,
+            background: "linear-gradient(135deg, #f5c518, #ffd54a)",
+            color: "#0a0a0a",
+            border: "none",
+            borderRadius: 16,
+            padding: "16px 20px",
+            fontSize: 18,
+            fontWeight: 900,
+            letterSpacing: 1.5,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+            boxShadow: "0 10px 30px rgba(0,0,0,0.45)",
+            transform: showMobileScanButton ? "translateY(0)" : "translateY(120px)",
+            opacity: showMobileScanButton ? 1 : 0,
+            pointerEvents: showMobileScanButton ? "auto" : "none",
+            transition: "transform 0.28s ease, opacity 0.28s ease",
+            WebkitTapHighlightColor: "transparent"
+          }}
+        >
+          <span style={{ fontSize: 22 }}>⊞</span>
+          SCAN BARCODE
+        </button>
+      )}
 
       {scanning && <BarcodeScanner onDetected={handleBarcodeScan} onClose={() => setScanning(false)} />}
       {selectedItem && <DetailModal item={selectedItem} onClose={() => setSelectedItem(null)} onDelete={handleDelete} />}
